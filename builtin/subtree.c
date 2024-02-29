@@ -10,7 +10,7 @@
 	N_("git subtree add --prefix=<prefix> <commit>")
 
 #define BUILTIN_SUBTREE_ADD_ALT_USAGE \
-	N_("git subtree add   --prefix=<prefix> <repository> <ref>")
+	N_("git subtree add --prefix=<prefix> <repository> <ref>")
 
 #define BUILTIN_SUBTREE_MERGE_USAGE \
 	N_("git subtree merge --prefix=<prefix> <commit>")
@@ -32,9 +32,44 @@ static const char *const git_subtree_usage[] = { BUILTIN_SUBTREE_ADD_USAGE,
 						 BUILTIN_SUBTREE_PUSH_USAGE,
 						 NULL };
 
+static const char *const git_subtree_add_usage[] = {
+	BUILTIN_SUBTREE_ADD_USAGE, BUILTIN_SUBTREE_ADD_ALT_USAGE, NULL
+};
+
+static int path_exists(const char *path)
+{
+	struct stat sb;
+	return !stat(path, &sb);
+}
+
 static int add(int argc, const char **argv, const char *prefix)
 {
-	printf(_("git subtree add\n"));
+	const char *subtree_prefix = NULL;
+	const char *commit_message = NULL;
+	int squash = 0;
+	struct option options[] = {
+		OPT_STRING_F(0, "prefix", &subtree_prefix, N_("prefix"),
+			     N_("the name of the subdir to split out"),
+			     PARSE_OPT_NONEG),
+		OPT_BOOL(0, "squash", &squash,
+			 N_("merge subtree changes as a single commit")),
+		OPT_STRING_F(
+			'm', "message", &commit_message, N_("message"),
+			N_("use the given message as the commit message for the merge commit"),
+			PARSE_OPT_NONEG),
+		OPT_END()
+	};
+
+	argc = parse_options(argc, argv, prefix, options, git_subtree_add_usage,
+			     0);
+	if (!subtree_prefix)
+		die(_("parameter '%s' is required"), "--prefix");
+	if (path_exists(subtree_prefix))
+		die(_("prefix '%s' already exists"), subtree_prefix);
+
+	if (argc < 1 || argc > 2)
+		usage_with_options(git_subtree_add_usage, options);
+
 	return 0;
 }
 
