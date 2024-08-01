@@ -4,11 +4,20 @@
 #include "config.h"
 #include "environment.h"
 #include "commit.h"
+#include "environment.h"
 #include "gettext.h"
+#include "hex.h"
+#include "lockfile.h"
+#include "object.h"
+#include "object-name.h"
 #include "parse-options.h"
 #include "refs.h"
 #include "repository.h"
+#include "run-command.h"
 #include "strbuf.h"
+#include "tree.h"
+#include "tree-walk.h"
+#include "unpack-trees.h"
 #include "wt-status.h"
 
 #define BUILTIN_SUBTREE_ADD_USAGE \
@@ -47,14 +56,116 @@ static int path_exists(const char *path)
 	return !stat(path, &sb);
 }
 
-static int add_commit(struct commit *commit, int rejoin, int squash)
+static int read_tree_prefix(struct commit *commit, const char *prefix)
 {
+	struct tree *tree;
+	struct lock_file lock_file = LOCK_INIT;
+	struct tree_desc tree_desc;
+	struct unpack_trees_options opts;
+
+	tree = repo_get_commit_tree(the_repository, commit);
+
+	if (!tree)
+		return error(_("couldn't get tree for commit %s"),
+			     oid_to_hex(&commit->object.oid));
+
+	repo_hold_locked_index(the_repository, &lock_file, LOCK_DIE_ON_ERROR);
+
+	if (parse_tree(tree))
+		return error(_("couldn't parse tree for commit %s"),
+			     oid_to_hex(&commit->object.oid));
+
+	init_tree_desc(&tree_desc, &tree->object.oid, tree->buffer, tree->size);
+
+	memset(&opts, 0, sizeof(opts));
+	opts.prefix = prefix;
+	opts.head_idx = -1;
+	opts.src_index = the_repository->index;
+	opts.dst_index = the_repository->index;
+	opts.fn = bind_merge;
+
+	if (unpack_trees(1, &tree_desc, &opts))
+		return error(_("couldn't unpack tree for commit %s"),
+			     oid_to_hex(&commit->object.oid));
+
+	if (write_locked_index(the_repository->index, &lock_file, COMMIT_LOCK))
+		die(_("unable to write new index file"));
+
 	return 0;
 }
 
-static int add_repository(const char *repository, const char *ref)
+static int checkout_prefix(const char *prefix)
 {
+	struct child_process cp = CHILD_PROCESS_INIT;
+
+	cp.git_cmd = 1;
+
+	strvec_push(&cp.args, "checkout");
+	strvec_push(&cp.args, "--");
+	strvec_push(&cp.args, prefix);
+
+	return run_command(&cp);
+}
+
+static int add_commit(struct commit *commit, int rejoin, int squash,
+		      const char *prefix)
+{
+	struct object_id tree_oid, curr_head_oid;
+	int head_is_parent;
+
+	if (!rejoin) {
+		if (read_tree_prefix(commit, prefix))
+			return error(
+				_("couldn't read tree into index for commit %s"),
+				oid_to_hex(&commit->object.oid));
+	}
+
+	if (checkout_prefix(prefix))
+		return error(_("couldn't checkout working tree at %s"), prefix);
+
+	if (write_index_as_tree(&tree_oid, the_repository->index,
+				get_index_file(), 0, NULL))
+		return error(_("couldn't write index into new tree"));
+
+	if (repo_get_oid_committish(the_repository, "HEAD", &curr_head_oid))
+		return error(_("couldn't get commit associated with HEAD"));
+
+	head_is_parent = oideq(&commit->object.oid, &curr_head_oid);
+
 	return 0;
+}
+
+static int fetch_repo_ref(const char *repository, const char *ref)
+{
+	struct child_process cp = CHILD_PROCESS_INIT;
+
+	cp.git_cmd = 1;
+
+	strvec_push(&cp.args, "fetch");
+	strvec_push(&cp.args, repository);
+	strvec_push(&cp.args, ref);
+
+	return run_command(&cp);
+}
+
+static int add_repository(const char *repository, const char *ref,
+			  const char *prefix)
+{
+	struct object_id oid;
+	int fetch_ret;
+
+	fetch_ret = fetch_repo_ref(repository, ref);
+
+	if (fetch_ret)
+		return error(_("couldn't fetch ref %s from repository %s"), ref,
+			     repository);
+
+	if (refs_read_ref(get_main_ref_store(the_repository), "FETCH_HEAD",
+			  &oid))
+		return error(_("couldn't read FETCH_HEAD after fetching %s"),
+			     repository);
+
+	return add_commit(lookup_commit(the_repository, &oid), 0, 0, prefix);
 }
 
 static int add(int argc, const char **argv, const char *prefix)
@@ -92,16 +203,16 @@ static int add(int argc, const char **argv, const char *prefix)
 			die(_("fatal: '%s' does not refer to a commit"),
 			    argv[0]);
 
-		return add_commit(commit, 0, squash);
+		return add_commit(commit, 0, squash, subtree_prefix);
 	} else if (argc == 2) {
 		ref = xstrfmt("refs/heads/%s", argv[1]);
-		if (!check_refname_format(ref, 0)) {
+		if (check_refname_format(ref, 0)) {
 			free(ref);
 			die(_("fatal: '%s' does not look like a ref"), argv[1]);
 		}
 		free(ref);
 
-		return add_repository(argv[0], argv[1]);
+		return add_repository(argv[0], argv[1], subtree_prefix);
 	} else
 		usage_with_options(git_subtree_add_usage, options);
 }
