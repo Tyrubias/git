@@ -3,20 +3,22 @@
 #include "commit.h"
 #include "config.h"
 #include "environment.h"
-#include "commit.h"
-#include "environment.h"
 #include "gettext.h"
 #include "hex.h"
 #include "lockfile.h"
-#include "object.h"
 #include "object-name.h"
+#include "object.h"
 #include "parse-options.h"
 #include "refs.h"
 #include "repository.h"
+#include "reset.h"
+#include "resolve-undo.h"
+#include "revision.h"
 #include "run-command.h"
 #include "strbuf.h"
-#include "tree.h"
+#include "trailer.h"
 #include "tree-walk.h"
+#include "tree.h"
 #include "unpack-trees.h"
 #include "wt-status.h"
 
@@ -50,6 +52,10 @@ static const char *const git_subtree_add_usage[] = {
 	BUILTIN_SUBTREE_ADD_USAGE, BUILTIN_SUBTREE_ADD_ALT_USAGE, NULL
 };
 
+#define GIT_SUBTREE_DIR_TRAILER "git-subtree-dir"
+#define GIT_SUBTREE_SPLIT_TRAILER "git-subtree-split"
+#define GIT_SUBTREE_MAIN_TRAILER "git-subtree-mainline"
+
 static int path_exists(const char *path)
 {
 	struct stat sb;
@@ -61,7 +67,7 @@ static int read_tree_prefix(struct commit *commit, const char *prefix)
 	struct tree *tree;
 	struct lock_file lock_file = LOCK_INIT;
 	struct tree_desc tree_desc;
-	struct unpack_trees_options opts;
+	struct unpack_trees_options opts = {0};
 
 	tree = repo_get_commit_tree(the_repository, commit);
 
@@ -71,18 +77,22 @@ static int read_tree_prefix(struct commit *commit, const char *prefix)
 
 	repo_hold_locked_index(the_repository, &lock_file, LOCK_DIE_ON_ERROR);
 
+	resolve_undo_clear_index(the_repository->index);
+
+	cache_tree_free(&the_repository->index->cache_tree);
+
 	if (parse_tree(tree))
 		return error(_("couldn't parse tree for commit %s"),
 			     oid_to_hex(&commit->object.oid));
 
 	init_tree_desc(&tree_desc, &tree->object.oid, tree->buffer, tree->size);
 
-	memset(&opts, 0, sizeof(opts));
+	opts.merge = 1;
 	opts.prefix = prefix;
-	opts.head_idx = -1;
+	opts.fn = bind_merge;
+	opts.head_idx = 1;
 	opts.src_index = the_repository->index;
 	opts.dst_index = the_repository->index;
-	opts.fn = bind_merge;
 
 	if (unpack_trees(1, &tree_desc, &opts))
 		return error(_("couldn't unpack tree for commit %s"),
@@ -94,7 +104,7 @@ static int read_tree_prefix(struct commit *commit, const char *prefix)
 	return 0;
 }
 
-static int checkout_prefix(const char *prefix)
+static int checkout_subtree_dir(const char *subtree_dir)
 {
 	struct child_process cp = CHILD_PROCESS_INIT;
 
@@ -102,26 +112,158 @@ static int checkout_prefix(const char *prefix)
 
 	strvec_push(&cp.args, "checkout");
 	strvec_push(&cp.args, "--");
-	strvec_push(&cp.args, prefix);
+	strvec_push(&cp.args, subtree_dir);
 
 	return run_command(&cp);
 }
 
-static int add_commit(struct commit *commit, int rejoin, int squash,
-		      const char *prefix)
+static int init_squash_message(struct strbuf *msg, struct commit *old_commit,
+			       struct commit *new_commit,
+			       const char *subtree_dir)
 {
-	struct object_id tree_oid, curr_head_oid;
-	int head_is_parent;
+	struct rev_info revs;
+	struct commit *commit;
+	struct pretty_print_context ctx = { 0 };
+	LIST_HEAD(raw_trailers);
+	LIST_HEAD(trailers);
+	struct list_head *pos, *tmp;
+	struct new_trailer_item *item;
+	struct process_trailer_options opts = PROCESS_TRAILER_OPTIONS_INIT;
+
+	if (old_commit) {
+		strbuf_addf(msg, "Squashed '%s/' changes from ", subtree_dir);
+		strbuf_add_unique_abbrev(msg, &old_commit->object.oid,
+					 DEFAULT_ABBREV);
+		strbuf_addf(msg, "..");
+		strbuf_add_unique_abbrev(msg, &new_commit->object.oid,
+					 DEFAULT_ABBREV);
+		strbuf_addchars(msg, '\n', 2);
+
+		repo_init_revisions(the_repository, &revs, NULL);
+		add_pending_object(&revs, &old_commit->object, NULL);
+		add_pending_object(&revs, &new_commit->object, NULL);
+
+		if (prepare_revision_walk(&revs))
+			return error(_(
+				"Failed to prepare revision walk while squashing"));
+
+		while ((commit = get_revision(&revs))) {
+			repo_format_commit_message(the_repository, commit,
+						   "%h %s", msg, &ctx);
+		}
+
+		reset_revision_walk();
+		release_revisions(&revs);
+
+		repo_init_revisions(the_repository, &revs, NULL);
+		add_pending_object(&revs, &old_commit->object, NULL);
+		add_pending_object(&revs, &new_commit->object, NULL);
+		revs.reverse ^= 1;
+
+		if (prepare_revision_walk(&revs))
+			return error(_(
+				"Failed to prepare revision walk while squashing"));
+
+		while ((commit = get_revision(&revs))) {
+			repo_format_commit_message(the_repository, commit,
+						   "REVERT: %h %s", msg, &ctx);
+		}
+
+		reset_revision_walk();
+		release_revisions(&revs);
+	} else {
+		strbuf_addf(msg, "Squashed '%s/' content from commit ",
+			    subtree_dir);
+		strbuf_add_unique_abbrev(msg, &new_commit->object.oid,
+					 DEFAULT_ABBREV);
+		strbuf_addch(msg, '\n');
+	}
+
+	strbuf_addch(msg, '\n');
+
+	trailer_config_init();
+
+	item = xmalloc(sizeof(*item));
+	item->text = xstrfmt("%s: %s", GIT_SUBTREE_DIR_TRAILER, subtree_dir);
+	item->where = WHERE_END;
+	list_add_tail(&item->list, &raw_trailers);
+
+	item = xmalloc(sizeof(*item));
+	item->text = xstrfmt("%s: %s", GIT_SUBTREE_SPLIT_TRAILER,
+			     oid_to_hex(&new_commit->object.oid));
+	item->where = WHERE_END;
+	list_add_tail(&item->list, &raw_trailers);
+
+	parse_trailers_from_command_line_args(&trailers, &raw_trailers);
+
+	format_trailers(&opts, &trailers, msg);
+
+	free_trailers(&trailers);
+
+	list_for_each_safe (pos, tmp, &raw_trailers) {
+		item = list_entry(pos, struct new_trailer_item, list);
+		free((char *)item->text);
+		free(item);
+	}
+
+	return 0;
+}
+
+static int new_squash_commit(struct object_id *new_squashed_commit,
+			     struct commit *old_squashed_commit,
+			     struct commit *old_commit,
+			     struct commit *new_commit, const char *subtree_dir)
+{
+	struct strbuf commit_message = STRBUF_INIT;
+	struct commit_list *parents = NULL;
+
+	if (old_squashed_commit) {
+		init_squash_message(&commit_message, old_commit, new_commit,
+				    subtree_dir);
+		commit_list_insert(old_squashed_commit, &parents);
+	} else {
+		init_squash_message(&commit_message, NULL, new_commit,
+				    subtree_dir);
+	}
+
+	return commit_tree(commit_message.buf, commit_message.len,
+			   get_commit_tree_oid(new_commit), parents,
+			   new_squashed_commit, NULL, NULL);
+}
+
+static inline struct strbuf *new_squashed_msg(const struct commit *commit,
+					      const char *subtree_dir,
+					      const char *commit_msg)
+{
+	struct strbuf *msg = xmalloc(sizeof(struct strbuf));
+	if (commit_msg)
+		strbuf_addstr(msg, commit_msg);
+	else
+		strbuf_addf(msg, "Merge commit '%s' as '%s'",
+			    oid_to_hex(&commit->object.oid), subtree_dir);
+
+	return msg;
+}
+
+static int add_commit(struct commit *commit, int rejoin, int squash,
+		      const char *subtree_dir, const char *commit_message)
+{
+	struct object_id tree_oid, curr_head_oid, new_squash_oid,
+		new_commit_oid;
+	struct commit_list *parents = NULL;
+	struct strbuf *new_squash_msg;
+	struct reset_head_opts reset_opts = { 0 };
 
 	if (!rejoin) {
-		if (read_tree_prefix(commit, prefix))
+		if (read_tree_prefix(commit, subtree_dir))
 			return error(
 				_("couldn't read tree into index for commit %s"),
 				oid_to_hex(&commit->object.oid));
 	}
 
-	if (checkout_prefix(prefix))
-		return error(_("couldn't checkout working tree at %s"), prefix);
+	if (checkout_subtree_dir(subtree_dir))
+		return error(_("couldn't checkout working tree at %s"),
+			     subtree_dir);
 
 	if (write_index_as_tree(&tree_oid, the_repository->index,
 				get_index_file(), 0, NULL))
@@ -130,9 +272,34 @@ static int add_commit(struct commit *commit, int rejoin, int squash,
 	if (repo_get_oid_committish(the_repository, "HEAD", &curr_head_oid))
 		return error(_("couldn't get commit associated with HEAD"));
 
-	head_is_parent = oideq(&commit->object.oid, &curr_head_oid);
+	if (oideq(&commit->object.oid, &curr_head_oid))
+		commit_list_insert(lookup_commit(the_repository,
+						 &curr_head_oid),
+				   &parents);
 
-	return 0;
+	if (squash) {
+		if (new_squash_commit(&new_squash_oid, NULL, NULL, commit,
+				      subtree_dir))
+			return error(
+				_("couldn't create new squash commit from %s"),
+				oid_to_hex(&commit->object.oid));
+
+		new_squash_msg = new_squashed_msg(
+			lookup_commit(the_repository, &new_squash_oid),
+			subtree_dir, commit_message);
+	} else {
+		new_squash_msg =
+			new_squashed_msg(commit, subtree_dir, commit_message);
+	}
+
+	if (commit_tree(new_squash_msg->buf, new_squash_msg->len, &tree_oid,
+			parents, &new_commit_oid, NULL, NULL))
+		return error(_("couldn't create new commit"));
+
+	reset_opts.oid = &new_commit_oid;
+	reset_opts.head_msg = "reset: checkout subtree commit";
+
+	return reset_head(the_repository, &reset_opts);
 }
 
 static int fetch_repo_ref(const char *repository, const char *ref)
@@ -149,7 +316,7 @@ static int fetch_repo_ref(const char *repository, const char *ref)
 }
 
 static int add_repository(const char *repository, const char *ref,
-			  const char *prefix)
+			  const char *subtree_dir, const char *commit_message)
 {
 	struct object_id oid;
 	int fetch_ret;
@@ -165,18 +332,19 @@ static int add_repository(const char *repository, const char *ref,
 		return error(_("couldn't read FETCH_HEAD after fetching %s"),
 			     repository);
 
-	return add_commit(lookup_commit(the_repository, &oid), 0, 0, prefix);
+	return add_commit(lookup_commit_or_die(&oid, "FETCH_HEAD"), 0, 0,
+			  subtree_dir, commit_message);
 }
 
 static int add(int argc, const char **argv, const char *prefix)
 {
-	const char *subtree_prefix = NULL;
+	const char *subtree_dir = NULL;
 	const char *commit_message = NULL;
 	char *ref = NULL;
 	struct commit *commit = NULL;
 	int squash = 0;
 	struct option options[] = {
-		OPT_STRING(0, "prefix", &subtree_prefix, N_("prefix"),
+		OPT_STRING(0, "prefix", &subtree_dir, N_("prefix"),
 			   N_("the name of the subdir to split out")),
 		OPT_BOOL(0, "squash", &squash,
 			 N_("merge subtree changes as a single commit")),
@@ -189,10 +357,10 @@ static int add(int argc, const char **argv, const char *prefix)
 
 	argc = parse_options(argc, argv, prefix, options, git_subtree_add_usage,
 			     0);
-	if (!subtree_prefix)
+	if (!subtree_dir)
 		die(_("parameter '%s' is required"), "--prefix");
-	if (path_exists(subtree_prefix))
-		die(_("prefix '%s' already exists"), subtree_prefix);
+	if (path_exists(subtree_dir))
+		die(_("prefix '%s' already exists"), subtree_dir);
 
 	require_clean_work_tree(the_repository, N_("subtree add"),
 				_("Please commit or stash them."), 0, 0);
@@ -203,7 +371,8 @@ static int add(int argc, const char **argv, const char *prefix)
 			die(_("fatal: '%s' does not refer to a commit"),
 			    argv[0]);
 
-		return add_commit(commit, 0, squash, subtree_prefix);
+		return add_commit(commit, 0, squash, subtree_dir,
+				  commit_message);
 	} else if (argc == 2) {
 		ref = xstrfmt("refs/heads/%s", argv[1]);
 		if (check_refname_format(ref, 0)) {
@@ -212,9 +381,11 @@ static int add(int argc, const char **argv, const char *prefix)
 		}
 		free(ref);
 
-		return add_repository(argv[0], argv[1], subtree_prefix);
-	} else
+		return add_repository(argv[0], argv[1], subtree_dir,
+				      commit_message);
+	} else {
 		usage_with_options(git_subtree_add_usage, options);
+	}
 }
 
 static int merge(int argc, const char **argv, const char *prefix)
