@@ -67,7 +67,7 @@ static int read_tree_prefix(struct commit *commit, const char *prefix)
 	struct tree *tree;
 	struct lock_file lock_file = LOCK_INIT;
 	struct tree_desc tree_desc;
-	struct unpack_trees_options opts = {0};
+	struct unpack_trees_options opts;
 
 	tree = repo_get_commit_tree(the_repository, commit);
 
@@ -76,6 +76,9 @@ static int read_tree_prefix(struct commit *commit, const char *prefix)
 			     oid_to_hex(&commit->object.oid));
 
 	repo_hold_locked_index(the_repository, &lock_file, LOCK_DIE_ON_ERROR);
+
+	if (repo_read_index_unmerged(the_repository))
+		die(_("You need to resolve your current index first"));
 
 	resolve_undo_clear_index(the_repository->index);
 
@@ -87,12 +90,13 @@ static int read_tree_prefix(struct commit *commit, const char *prefix)
 
 	init_tree_desc(&tree_desc, &tree->object.oid, tree->buffer, tree->size);
 
+	memset(&opts, 0, sizeof(opts));
 	opts.merge = 1;
 	opts.prefix = prefix;
 	opts.fn = bind_merge;
 	opts.head_idx = 1;
-	opts.src_index = the_repository->index;
 	opts.dst_index = the_repository->index;
+	opts.src_index = the_repository->index;
 
 	if (unpack_trees(1, &tree_desc, &opts))
 		return error(_("couldn't unpack tree for commit %s"),
