@@ -276,7 +276,7 @@ static int add_commit(struct commit *commit, int rejoin, int squash,
 	if (repo_get_oid_committish(the_repository, "HEAD", &curr_head_oid))
 		return error(_("couldn't get commit associated with HEAD"));
 
-	if (oideq(&commit->object.oid, &curr_head_oid))
+	if (!oideq(&commit->object.oid, &curr_head_oid))
 		commit_list_insert(lookup_commit(the_repository,
 						 &curr_head_oid),
 				   &parents);
@@ -291,9 +291,14 @@ static int add_commit(struct commit *commit, int rejoin, int squash,
 		new_squash_msg = new_squashed_msg(
 			lookup_commit(the_repository, &new_squash_oid),
 			subtree_dir, commit_message);
+
+		commit_list_insert(lookup_commit(the_repository,
+						 &new_squash_oid),
+				   &parents);
 	} else {
 		new_squash_msg =
 			new_squashed_msg(commit, subtree_dir, commit_message);
+		commit_list_insert(commit, &parents);
 	}
 
 	if (commit_tree(new_squash_msg->buf, new_squash_msg->len, &tree_oid,
@@ -320,7 +325,8 @@ static int fetch_repo_ref(const char *repository, const char *ref)
 }
 
 static int add_repository(const char *repository, const char *ref,
-			  const char *subtree_dir, const char *commit_message)
+			  const char *subtree_dir, const char *commit_message,
+			  int squash)
 {
 	struct object_id oid;
 	int fetch_ret;
@@ -336,7 +342,7 @@ static int add_repository(const char *repository, const char *ref,
 		return error(_("couldn't read FETCH_HEAD after fetching %s"),
 			     repository);
 
-	return add_commit(lookup_commit_or_die(&oid, "FETCH_HEAD"), 0, 0,
+	return add_commit(lookup_commit_or_die(&oid, "FETCH_HEAD"), 0, squash,
 			  subtree_dir, commit_message);
 }
 
@@ -372,8 +378,7 @@ static int add(int argc, const char **argv, const char *prefix)
 	if (argc == 1) {
 		commit = lookup_commit_reference_by_name(argv[0]);
 		if (!commit)
-			die(_("fatal: '%s' does not refer to a commit"),
-			    argv[0]);
+			die(_("'%s' does not refer to a commit"), argv[0]);
 
 		return add_commit(commit, 0, squash, subtree_dir,
 				  commit_message);
@@ -381,12 +386,12 @@ static int add(int argc, const char **argv, const char *prefix)
 		ref = xstrfmt("refs/heads/%s", argv[1]);
 		if (check_refname_format(ref, 0)) {
 			free(ref);
-			die(_("fatal: '%s' does not look like a ref"), argv[1]);
+			die(_("'%s' does not look like a ref"), argv[1]);
 		}
 		free(ref);
 
 		return add_repository(argv[0], argv[1], subtree_dir,
-				      commit_message);
+				      commit_message, squash);
 	} else {
 		usage_with_options(git_subtree_add_usage, options);
 	}
