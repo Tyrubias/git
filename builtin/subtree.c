@@ -397,10 +397,98 @@ static int add(int argc, const char **argv, const char *prefix)
 	}
 }
 
+static int find_latest_squash(const char *subtree_dir, const char *repository,
+			      struct object_id *commit_oid,
+			      struct object_id *split_oid)
+{
+	struct rev_info revs;
+	struct commit *commit;
+	struct strbuf msg = STRBUF_INIT;
+	struct pretty_print_context ctx = { 0 };
+
+	repo_init_revisions(the_repository, &revs, NULL);
+	add_head_to_pending(&revs);
+
+	if (prepare_revision_walk(&revs))
+		return error(_("Failed to prepare revision walk"));
+
+	while ((commit = get_revision(&revs))) {
+		strbuf_reset(&msg);
+
+		repo_format_commit_message(the_repository, commit, "%b", &msg,
+					   &ctx);
+
+		const char *buffer = msg.buf;
+		const char *dir_marker = strstr(buffer, "git-subtree-dir: ");
+		const char *mainline_marker =
+			strstr(buffer, "git-subtree-mainline: ");
+		const char *split_marker =
+			strstr(buffer, "git-subtree-split: ");
+
+		if (dir_marker && strstr(dir_marker, subtree_dir) &&
+		    split_marker) {
+			if (mainline_marker) {
+				// Treat as a rejoin commit
+				commit = commit->parents->next->next->item;
+			}
+			if (commit_oid)
+				oidcpy(commit_oid, &commit->object.oid);
+			if (split_oid)
+				get_oid_hex(
+					split_marker +
+						strlen("git-subtree-split: "),
+					split_oid);
+			break;
+		}
+	}
+
+	reset_revision_walk();
+	release_revisions(&revs);
+	strbuf_release(&msg);
+
+	return 0;
+}
+
 static int merge(int argc, const char **argv, const char *prefix)
 {
-	printf(_("git subtree merge\n"));
-	return 0;
+	const char *subtree_dir = NULL;
+	const char *commit_message = NULL;
+	struct commit *commit = NULL;
+	int squash = 0;
+	struct option options[] = {
+		OPT_STRING(0, "prefix", &subtree_dir, N_("prefix"),
+			   N_("the name of the subdir to split out")),
+		OPT_BOOL(0, "squash", &squash,
+			 N_("merge subtree changes as a single commit")),
+		OPT_STRING_F(
+			'm', "message", &commit_message, N_("message"),
+			N_("use the given message as the commit message for the merge commit"),
+			PARSE_OPT_NONEG),
+		OPT_END()
+	};
+
+	argc = parse_options(argc, argv, prefix, options, git_subtree_add_usage,
+			     0);
+
+	if (argc < 1 || argc > 2)
+		die(_("you must provide exactly one revision, and optionally a repository."));
+
+	if (!subtree_dir)
+		die(_("parameter '%s' is required"), "--prefix");
+	if (!path_exists(subtree_dir))
+		die(_("'%s' does not exist; use 'git subtree add'"),
+		    subtree_dir);
+
+	require_clean_work_tree(the_repository, N_("subtree add"),
+				_("Please commit or stash them."), 0, 0);
+
+	commit = lookup_commit_reference_by_name(argv[0]);
+
+	if (!commit)
+		die(_("'%s' does not refer to a commit"), argv[0]);
+
+	if (squash) {
+	}
 }
 
 static int split(int argc, const char **argv, const char *prefix)
