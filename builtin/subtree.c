@@ -397,14 +397,44 @@ static int add(int argc, const char **argv, const char *prefix)
 	}
 }
 
+static int process_subtree_split(struct commit *main_commit,
+				 const char *split_hash, const char *repository,
+				 struct object_id *split_oid)
+{
+	if (repo_get_oid_commit(the_repository, split_hash, split_oid)) {
+		if (repository) {
+			if (fetch_repo_ref(repository, split_hash))
+				return error(
+					_("couldn't fetch ref %s from repository %s"),
+					split_hash, repository);
+			if (repo_get_oid_commit(the_repository, split_hash,
+						split_oid))
+				return error(
+					_("could not rev-parse split hash %s from commit %s"),
+					split_hash,
+					oid_to_hex(&main_commit->object.oid));
+		} else {
+			return error(
+				_("could not rev-parse split hash %s from commit %s"),
+				split_hash,
+				oid_to_hex(&main_commit->object.oid));
+		}
+	}
+
+	return error(_("could not rev-parse split hash %s from commit %s"),
+		     split_hash, oid_to_hex(&main_commit->object.oid));
+}
+
 static int find_latest_squash(const char *subtree_dir, const char *repository,
 			      struct object_id *commit_oid,
 			      struct object_id *split_oid)
 {
 	struct rev_info revs;
 	struct commit *commit;
-	struct strbuf msg = STRBUF_INIT;
-	struct pretty_print_context ctx = { 0 };
+	struct strbuf msg = STRBUF_INIT, main = STRBUF_INIT,
+		      split = STRBUF_INIT;
+	struct trailer_iterator iter;
+	int success = -1;
 
 	repo_init_revisions(the_repository, &revs, NULL);
 	add_head_to_pending(&revs);
@@ -413,40 +443,49 @@ static int find_latest_squash(const char *subtree_dir, const char *repository,
 		return error(_("Failed to prepare revision walk"));
 
 	while ((commit = get_revision(&revs))) {
-		strbuf_reset(&msg);
-
-		repo_format_commit_message(the_repository, commit, "%b", &msg,
-					   &ctx);
-
-		const char *buffer = msg.buf;
-		const char *dir_marker = strstr(buffer, "git-subtree-dir: ");
-		const char *mainline_marker =
-			strstr(buffer, "git-subtree-mainline: ");
-		const char *split_marker =
-			strstr(buffer, "git-subtree-split: ");
-
-		if (dir_marker && strstr(dir_marker, subtree_dir) &&
-		    split_marker) {
-			if (mainline_marker) {
-				// Treat as a rejoin commit
-				commit = commit->parents->next->next->item;
+		pp_commit_easy(CMIT_FMT_RAW, commit, &msg);
+		trailer_iterator_init(&iter, msg.buf);
+		while (trailer_iterator_advance(&iter)) {
+			if (!strcmp(iter.key.buf, GIT_SUBTREE_DIR_TRAILER) &&
+			    strcmp(iter.val.buf, subtree_dir))
+				goto continue_outer;
+			if (!strcmp(iter.key.buf, GIT_SUBTREE_MAIN_TRAILER))
+				strbuf_addbuf(&main, &iter.val);
+			else if (!strcmp(iter.key.buf,
+					 GIT_SUBTREE_SPLIT_TRAILER))
+				strbuf_addbuf(&split, &iter.val);
+		}
+		if (split.len) {
+			if (main.len) {
+				if (commit_list_count(commit->parents) > 2)
+					*commit_oid =
+						commit->parents->next->item
+							->object.oid;
+				else
+					goto finish;
+			} else {
+				*commit_oid = commit->object.oid;
 			}
-			if (commit_oid)
-				oidcpy(commit_oid, &commit->object.oid);
-			if (split_oid)
-				get_oid_hex(
-					split_marker +
-						strlen("git-subtree-split: "),
-					split_oid);
+			if (process_subtree_split(commit, split.buf, repository,
+						  split_oid))
+				goto finish;
+
+			success = 0;
 			break;
 		}
+	continue_outer:
+		trailer_iterator_release(&iter);
+		strbuf_reset(&msg);
 	}
 
+finish:
 	reset_revision_walk();
 	release_revisions(&revs);
 	strbuf_release(&msg);
+	strbuf_release(&main);
+	strbuf_release(&split);
 
-	return 0;
+	return success;
 }
 
 static int merge(int argc, const char **argv, const char *prefix)
@@ -454,6 +493,7 @@ static int merge(int argc, const char **argv, const char *prefix)
 	const char *subtree_dir = NULL;
 	const char *commit_message = NULL;
 	struct commit *commit = NULL;
+	struct object_id last_squash_commit_oid, last_subtree_commit_oid;
 	int squash = 0;
 	struct option options[] = {
 		OPT_STRING(0, "prefix", &subtree_dir, N_("prefix"),
@@ -488,7 +528,20 @@ static int merge(int argc, const char **argv, const char *prefix)
 		die(_("'%s' does not refer to a commit"), argv[0]);
 
 	if (squash) {
+		if (find_latest_squash(subtree_dir, argc == 2 ? argv[1] : NULL,
+				       &last_squash_commit_oid,
+				       &last_subtree_commit_oid))
+			return error(
+				_("can't squash-merge: '%s' was never added."),
+				subtree_dir);
+		if (oideq(&last_subtree_commit_oid, &commit->object.oid)) {
+			warning(_("Subtree is already at commit %s"),
+				oid_to_hex(&commit->object.oid));
+			return 0;
+		}
 	}
+
+	return 0;
 }
 
 static int split(int argc, const char **argv, const char *prefix)
