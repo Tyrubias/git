@@ -488,12 +488,33 @@ finish:
 	return success;
 }
 
+static int do_subtree_merge(const char *subtree_dir, const char *msg,
+			    struct commit *commit)
+{
+	struct child_process cp = CHILD_PROCESS_INIT;
+
+	cp.git_cmd = 1;
+
+	strvec_push(&cp.args, "merge");
+	strvec_push(&cp.args, "--no-ff");
+	strvec_push(&cp.args, "-X");
+	strvec_push(&cp.args, xstrfmt("subtree=%s", subtree_dir));
+	if (msg) {
+		strvec_push(&cp.args, "-m");
+		strvec_push(&cp.args, msg);
+	}
+	strvec_push(&cp.args, oid_to_hex(&commit->object.oid));
+
+	return run_command(&cp);
+}
+
 static int merge(int argc, const char **argv, const char *prefix)
 {
 	const char *subtree_dir = NULL;
 	const char *commit_message = NULL;
 	struct commit *commit = NULL;
-	struct object_id last_squash_commit_oid, last_subtree_commit_oid;
+	struct object_id last_squash_commit_oid, last_subtree_commit_oid,
+		new_squash_commit_oid;
 	int squash = 0;
 	struct option options[] = {
 		OPT_STRING(0, "prefix", &subtree_dir, N_("prefix"),
@@ -539,9 +560,17 @@ static int merge(int argc, const char **argv, const char *prefix)
 				oid_to_hex(&commit->object.oid));
 			return 0;
 		}
+		if (new_squash_commit(&new_squash_commit_oid,
+				      lookup_commit(the_repository,
+						    &last_squash_commit_oid),
+				      lookup_commit(the_repository,
+						    &last_subtree_commit_oid),
+				      commit, subtree_dir))
+			return error(_("couldn't create new squash commit"));
 	}
 
-	return 0;
+	return do_subtree_merge(subtree_dir, commit_message, commit);
+	;
 }
 
 static int split(int argc, const char **argv, const char *prefix)
