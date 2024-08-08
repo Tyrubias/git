@@ -153,7 +153,7 @@ static int init_squash_message(struct strbuf *msg, struct commit *old_commit,
 
 		while ((commit = get_revision(&revs))) {
 			repo_format_commit_message(the_repository, commit,
-						   "%h %s", msg, &ctx);
+						   "%h %s%n", msg, &ctx);
 		}
 
 		reset_revision_walk();
@@ -170,7 +170,7 @@ static int init_squash_message(struct strbuf *msg, struct commit *old_commit,
 
 		while ((commit = get_revision(&revs))) {
 			repo_format_commit_message(the_repository, commit,
-						   "REVERT: %h %s", msg, &ctx);
+						   "REVERT: %h %s%n", msg, &ctx);
 		}
 
 		reset_revision_walk();
@@ -421,8 +421,7 @@ static int process_subtree_split(struct commit *main_commit,
 		}
 	}
 
-	return error(_("could not rev-parse split hash %s from commit %s"),
-		     split_hash, oid_to_hex(&main_commit->object.oid));
+	return 0;
 }
 
 static int find_latest_squash(const char *subtree_dir, const char *repository,
@@ -435,6 +434,7 @@ static int find_latest_squash(const char *subtree_dir, const char *repository,
 		      split = STRBUF_INIT;
 	struct trailer_iterator iter;
 	int success = -1;
+	struct pretty_print_context ctx = { 0 };
 
 	repo_init_revisions(the_repository, &revs, NULL);
 	add_head_to_pending(&revs);
@@ -443,7 +443,8 @@ static int find_latest_squash(const char *subtree_dir, const char *repository,
 		return error(_("Failed to prepare revision walk"));
 
 	while ((commit = get_revision(&revs))) {
-		pp_commit_easy(CMIT_FMT_RAW, commit, &msg);
+		repo_format_commit_message(the_repository, commit, "%B", &msg,
+					   &ctx);
 		trailer_iterator_init(&iter, msg.buf);
 		while (trailer_iterator_advance(&iter)) {
 			if (!strcmp(iter.key.buf, GIT_SUBTREE_DIR_TRAILER) &&
@@ -501,7 +502,7 @@ static int do_subtree_merge(const char *subtree_dir, const char *msg,
 	strvec_push(&cp.args, xstrfmt("subtree=%s", subtree_dir));
 	if (msg) {
 		strvec_push(&cp.args, "-m");
-		strvec_push(&cp.args, msg);
+		strvec_push(&cp.args, xstrfmt("\"%s\"", msg));
 	}
 	strvec_push(&cp.args, oid_to_hex(&commit->object.oid));
 
@@ -567,10 +568,11 @@ static int merge(int argc, const char **argv, const char *prefix)
 						    &last_subtree_commit_oid),
 				      commit, subtree_dir))
 			return error(_("couldn't create new squash commit"));
+
+		commit = lookup_commit(the_repository, &new_squash_commit_oid);
 	}
 
 	return do_subtree_merge(subtree_dir, commit_message, commit);
-	;
 }
 
 static int split(int argc, const char **argv, const char *prefix)
