@@ -1,5 +1,6 @@
 #include "builtin.h"
 #include "cache-tree.h"
+#include "commit-reach.h"
 #include "commit.h"
 #include "config.h"
 #include "environment.h"
@@ -133,6 +134,7 @@ static int init_squash_message(struct strbuf *msg, struct commit *old_commit,
 	struct list_head *pos, *tmp;
 	struct new_trailer_item *item;
 	struct process_trailer_options opts = PROCESS_TRAILER_OPTIONS_INIT;
+	const char *rev_format = "%h %s%n";
 
 	if (old_commit) {
 		strbuf_addf(msg, "Squashed '%s/' changes from ", subtree_dir);
@@ -151,26 +153,15 @@ static int init_squash_message(struct strbuf *msg, struct commit *old_commit,
 			return error(_(
 				"Failed to prepare revision walk while squashing"));
 
-		while ((commit = get_revision(&revs))) {
-			repo_format_commit_message(the_repository, commit,
-						   "%h %s%n", msg, &ctx);
+		if (!repo_in_merge_bases(the_repository, old_commit,
+					new_commit)) {
+			revs.reverse ^= 1;
+			rev_format = "REVERT: %h %s%n";
 		}
 
-		reset_revision_walk();
-		release_revisions(&revs);
-
-		repo_init_revisions(the_repository, &revs, NULL);
-		add_pending_object(&revs, &old_commit->object, NULL);
-		add_pending_object(&revs, &new_commit->object, NULL);
-		revs.reverse ^= 1;
-
-		if (prepare_revision_walk(&revs))
-			return error(_(
-				"Failed to prepare revision walk while squashing"));
-
 		while ((commit = get_revision(&revs))) {
 			repo_format_commit_message(the_repository, commit,
-						   "REVERT: %h %s%n", msg, &ctx);
+						   rev_format, msg, &ctx);
 		}
 
 		reset_revision_walk();
