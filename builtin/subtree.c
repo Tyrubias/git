@@ -145,6 +145,7 @@ static int init_squash_message(struct strbuf *msg, struct commit *old_commit,
 		strbuf_addchars(msg, '\n', 2);
 
 		repo_init_revisions(repo, &revs, NULL);
+		old_commit->object.flags |= UNINTERESTING | BOTTOM;
 		add_pending_object(&revs, &old_commit->object, NULL);
 		add_pending_object(&revs, &new_commit->object, NULL);
 
