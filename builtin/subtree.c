@@ -63,7 +63,7 @@ static int path_exists(const char *path)
 	return !stat(path, &sb);
 }
 
-static int read_tree_prefix(struct commit *commit, const char *prefix,
+static int read_tree_prefix(const struct commit *commit, const char *prefix,
 			    struct repository *repo)
 {
 	struct tree *tree;
@@ -225,9 +225,9 @@ static int new_squash_commit(struct object_id *new_squashed_commit,
 			   new_squashed_commit, NULL, NULL);
 }
 
-static inline struct strbuf *new_squashed_msg(const struct commit *commit,
-					      const char *subtree_dir,
-					      const char *commit_msg)
+static struct strbuf *new_squashed_msg(const struct commit *commit,
+				       const char *subtree_dir,
+				       const char *commit_msg)
 {
 	struct strbuf *msg = xmalloc(sizeof(struct strbuf));
 	if (commit_msg)
@@ -347,7 +347,7 @@ static int add(int argc, const char **argv, const char *prefix,
 	char *ref = NULL;
 	struct commit *commit = NULL;
 	int squash = 0;
-	struct option options[] = {
+	const struct option options[] = {
 		OPT_STRING(0, "prefix", &subtree_dir, N_("prefix"),
 			   N_("the name of the subdir to split out")),
 		OPT_BOOL(0, "squash", &squash,
@@ -390,7 +390,7 @@ static int add(int argc, const char **argv, const char *prefix,
 	}
 }
 
-static int process_subtree_split(struct commit *main_commit,
+static int process_subtree_split(const struct commit *main_commit,
 				 const char *split_hash, const char *repository,
 				 struct object_id *split_oid,
 				 struct repository *repo)
@@ -424,7 +424,7 @@ static int find_latest_squash(const char *subtree_dir, const char *repository,
 	struct strbuf msg = STRBUF_INIT, main = STRBUF_INIT, split = STRBUF_INIT;
 	struct trailer_iterator iter;
 	int success = -1;
-	struct pretty_print_context ctx = { 0 };
+	const struct pretty_print_context ctx = { 0 };
 
 	repo_init_revisions(repo, &revs, NULL);
 	add_head_to_pending(&revs);
@@ -477,7 +477,7 @@ finish:
 }
 
 static int do_subtree_merge(const char *subtree_dir, const char *msg,
-			    struct commit *commit)
+			    const struct commit *commit)
 {
 	struct child_process cp = CHILD_PROCESS_INIT;
 
@@ -505,7 +505,7 @@ static int merge(int argc, const char **argv, const char *prefix,
 	struct object_id last_squash_commit_oid, last_subtree_commit_oid,
 		new_squash_commit_oid;
 	int squash = 0;
-	struct option options[] = {
+	const struct option options[] = {
 		OPT_STRING(0, "prefix", &subtree_dir, N_("prefix"),
 			   N_("the name of the subdir to split out")),
 		OPT_BOOL(0, "squash", &squash,
@@ -583,12 +583,12 @@ int cmd_subtree(int argc, const char **argv, const char *prefix,
 		struct repository *repo)
 {
 	parse_opt_subcommand_fn *fn = NULL;
-	struct option options[] = { OPT_SUBCOMMAND("add", &fn, add),
-				    OPT_SUBCOMMAND("merge", &fn, merge),
-				    OPT_SUBCOMMAND("split", &fn, split),
-				    OPT_SUBCOMMAND("pull", &fn, pull),
-				    OPT_SUBCOMMAND("push", &fn, push),
-				    OPT_END() };
+	const struct option options[] = { OPT_SUBCOMMAND("add", &fn, add),
+					  OPT_SUBCOMMAND("merge", &fn, merge),
+					  OPT_SUBCOMMAND("split", &fn, split),
+					  OPT_SUBCOMMAND("pull", &fn, pull),
+					  OPT_SUBCOMMAND("push", &fn, push),
+					  OPT_END() };
 
 	repo_config(repo, git_default_config, NULL);
 
